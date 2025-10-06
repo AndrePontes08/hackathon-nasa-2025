@@ -6,6 +6,8 @@ from sklearn.linear_model import LinearRegression
 import math
 import os
 import time
+import pandas as pd
+import matplotlib.pyplot as plt
 
 # --- CONFIGURAÇÕES ---
 IMAGE_FOLDER = 'dataset2'
@@ -15,6 +17,7 @@ YEAR_TO_PREDICT = 2030
 RESIZE_PERCENT_FOR_ANALYSIS = 30
 ANIMATION_IMAGE_WIDTH = 600
 FINAL_IMAGE_DISPLAY_WIDTH = 500
+CSV_PATH = "populacao_municipios.csv"
 
 # --- FUNÇÕES DE ANÁLISE ---
 
@@ -33,7 +36,7 @@ def calculate_metrics(mask):
         centroid = (cx, cy)
     return area, centroid
 
-# --- FUNÇÃO PRINCIPAL ---
+# --- FUNÇÃO PRINCIPAL DE ANÁLISE URBANA ---
 
 def run_analysis_and_prediction(image_placeholder, status_placeholder):
     try:
@@ -140,14 +143,13 @@ def run_analysis_and_prediction(image_placeholder, status_placeholder):
     
     return final_image_rgb, results
 
-
 # --- INTERFACE STREAMLIT ---
 
 st.set_page_config(layout="wide", page_title="Previsão de Expansão Urbana")
 st.title("📈 Previsão de Expansão Urbana - João Pessoa")
 
 st.markdown("""
-Este aplicativo analisa imagens históricas de satélite e estima a região com maior crescimento no urbano futuro até 2030.
+Este aplicativo analisa imagens históricas de satélite e estima a expansão urbana até o ano de 2030.
 """)
 
 if st.button('Iniciar Análise e Previsão'):
@@ -162,12 +164,32 @@ if st.button('Iniciar Análise e Previsão'):
     if final_prediction_image is not None and results is not None:
         status_placeholder.empty()
         image_placeholder.empty()
-        st.success("Análise concluída com sucesso!")
+        st.success("✅ Análise concluída com sucesso!")
         st.image(final_prediction_image, caption=f"Previsão para {results['predicted_year']}", use_container_width=True)
         
-        st.subheader("Resultados da Previsão")
+        st.subheader("📊 Resultados da Previsão")
         col1, col2 = st.columns(2)
         col1.metric(label="Ano Base", value=results['last_year'])
         col2.metric(label="Aumento Estimado de Área", value=f"{results['area_increase_percent']:.2f} %")
+
+        # --- EXIBE O GRÁFICO DO CSV ---
+        if os.path.exists(CSV_PATH):
+            st.divider()
+            st.header("📈 Variação Populacional das Capitais (2010–2022)")
+
+            df = pd.read_csv(CSV_PATH)
+            df_sorted = df.sort_values(by="Variacao", ascending=False)
+
+            fig, ax = plt.subplots(figsize=(10, 6))
+            ax.barh(df_sorted["Municipio"], df_sorted["Variacao"], color='skyblue')
+            ax.set_xlabel("Variação Populacional (%)")
+            ax.set_ylabel("Município")
+            ax.set_title("Variação Populacional entre 2010 e 2022")
+            ax.grid(axis='x', linestyle='--', alpha=0.6)
+            ax.invert_yaxis()
+
+            st.pyplot(fig)
+        else:
+            st.warning("Arquivo CSV 'populacao_municipios.csv' não encontrado no diretório.")
 else:
     st.warning("Clique no botão acima para iniciar.")
