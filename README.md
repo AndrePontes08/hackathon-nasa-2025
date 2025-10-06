@@ -2,7 +2,7 @@
 
 Ferramenta interativa para previsão de crescimento urbano com base em imagens históricas de satélite.  
 Desenvolvido em Python com **Streamlit**, **OpenCV** e **Scikit-learn**.
-
+https://hackathon-nasa-2025.streamlit.app/
 ## 🚀 Execução
 
 ```bash
