@@ -1,101 +1,173 @@
 import streamlit as st
-import folium
-from streamlit_folium import st_folium
+import cv2
+import numpy as np
+from sklearn.cluster import MiniBatchKMeans
+from sklearn.linear_model import LinearRegression
+import math
+import os
+import time
 
-# Título da Aplicação e configuração da página
-st.set_page_config(page_title="Análise Geoespacial de João Pessoa", layout="wide")
-st.title("Análise de Cobertura e Uso da Terra em João Pessoa")
-st.write("Mapa base de satélite (ESRI World Imagery) com camadas do IBGE e IBAMA.")
+# --- CONFIGURAÇÕES ---
+IMAGE_FOLDER = 'dataset'
+N_CLUSTERS = 4
+URBAN_REFERENCE_COLOR = np.array([120, 110, 100])
+YEAR_TO_PREDICT = 2030
+RESIZE_PERCENT_FOR_ANALYSIS = 30
+ANIMATION_IMAGE_WIDTH = 600
+FINAL_IMAGE_DISPLAY_WIDTH = 500
 
+# --- FUNÇÕES DE ANÁLISE ---
 
-st.image("mapbiomasevolution.gif", caption="Minha animação local")
-# Dicionário com as camadas WMS que você precisa
-CAMADAS_WMS = {
-    "Áreas Embargadas (IBAMA)": {
-        "url": "http://siscom.ibama.gov.br/geoserver/publica/wms",
-        "layer_name": "publica:vw_brasil_adm_embargo_a"
-    },
-    "Cobertura e Uso da Terra 2014 (IBGE)": {
-        "url": "https://geoservicos.ibge.gov.br/geoserver/wms",
-        "layer_name": "CREN:Uso_Brasil_2014"
-    },
-    "Cobertura e Uso da Terra 2000 (IBGE)": {
-        "url": "https://geoservicos.ibge.gov.br/geoserver/wms",
-        "layer_name": "CREN:Uso_Brasil_2000"
+def find_urban_cluster_index(kmeans_model, reference_color):
+    cluster_centers = kmeans_model.cluster_centers_
+    distances = np.linalg.norm(cluster_centers - reference_color, axis=1)
+    return np.argmin(distances)
+
+def calculate_metrics(mask):
+    area = np.sum(mask) / 255
+    moments = cv2.moments(mask)
+    centroid = None
+    if moments["m00"] != 0:
+        cx = int(moments["m10"] / moments["m00"])
+        cy = int(moments["m01"] / moments["m00"])
+        centroid = (cx, cy)
+    return area, centroid
+
+# --- FUNÇÃO PRINCIPAL ---
+
+def run_analysis_and_prediction(image_placeholder, status_placeholder):
+    try:
+        image_files = sorted([f for f in os.listdir(IMAGE_FOLDER) if f.lower().endswith('.png')])
+        if not image_files:
+            st.error(f"A pasta '{IMAGE_FOLDER}' não foi encontrada ou não contém arquivos .png.")
+            return None, None
+    except FileNotFoundError:
+        st.error(f"A pasta '{IMAGE_FOLDER}' não foi encontrada.")
+        return None, None
+
+    historical_data = []
+    resized_w, resized_h = 0, 0
+    original_w, original_h = 0, 0
+
+    for image_file in image_files:
+        year_str = "".join(filter(str.isdigit, os.path.splitext(image_file)[0]))
+        if not year_str:
+            continue
+        year = int(year_str)
+
+        image_path = os.path.join(IMAGE_FOLDER, image_file)
+        status_placeholder.info(f"Processando imagem do ano {year}...")
+        image_placeholder.image(image_path, caption=f"Analisando: {year}", width=ANIMATION_IMAGE_WIDTH)
+        time.sleep(0.6)
+
+        image = cv2.imread(image_path)
+        if image is None:
+            continue
+
+        if original_w == 0:
+            original_h, original_w, _ = image.shape
+            resized_w = int(original_w * RESIZE_PERCENT_FOR_ANALYSIS / 100)
+            resized_h = int(original_h * RESIZE_PERCENT_FOR_ANALYSIS / 100)
+        
+        resized_image = cv2.resize(cv2.cvtColor(image, cv2.COLOR_BGR2RGB), (resized_w, resized_h))
+        pixel_data = resized_image.reshape((-1, 3))
+        
+        kmeans = MiniBatchKMeans(n_clusters=N_CLUSTERS, random_state=42, n_init=10).fit(pixel_data)
+        urban_cluster_label = find_urban_cluster_index(kmeans, URBAN_REFERENCE_COLOR)
+        urban_mask = (kmeans.labels_ == urban_cluster_label).reshape(resized_image.shape[:2]).astype(np.uint8) * 255
+        area, centroid = calculate_metrics(urban_mask)
+
+        if centroid and area > 0:
+            historical_data.append({
+                'year': year,
+                'area': area,
+                'cx': centroid[0],
+                'cy': centroid[1],
+                'filename': image_file
+            })
+
+    if len(historical_data) < 2:
+        st.error("Dados insuficientes para o modelo. São necessárias pelo menos 2 imagens.")
+        return None, None
+
+    status_placeholder.info("Treinando modelo de previsão...")
+    time.sleep(1)
+    
+    historical_data.sort(key=lambda x: x['year'])
+    X = np.array([d['year'] for d in historical_data]).reshape(-1, 1)
+    model_area = LinearRegression().fit(X, np.array([d['area'] for d in historical_data]))
+    model_cx = LinearRegression().fit(X, np.array([d['cx'] for d in historical_data]))
+    model_cy = LinearRegression().fit(X, np.array([d['cy'] for d in historical_data]))
+
+    status_placeholder.info(f"Calculando previsão para {YEAR_TO_PREDICT}...")
+    time.sleep(1)
+
+    year_future = np.array([[YEAR_TO_PREDICT]])
+    predicted_area = model_area.predict(year_future)[0]
+    predicted_cx_resized = model_cx.predict(year_future)[0]
+    predicted_cy_resized = model_cy.predict(year_future)[0]
+
+    last_data = historical_data[-1]
+    area_increase_resized = predicted_area - last_data['area']
+    last_image_path = os.path.join(IMAGE_FOLDER, last_data['filename'])
+    final_image_hr = cv2.imread(last_image_path)
+
+    scale_factor = original_w / resized_w
+    final_cx = int(predicted_cx_resized * scale_factor)
+    final_cy = int(predicted_cy_resized * scale_factor)
+    last_cx_hr = int(last_data['cx'] * scale_factor)
+    last_cy_hr = int(last_data['cy'] * scale_factor)
+    area_increase_hr = area_increase_resized * (scale_factor ** 2)
+    radius_of_growth_hr = int(math.sqrt(max(0, area_increase_hr) / math.pi))
+
+    overlay = final_image_hr.copy()
+    cv2.circle(overlay, (final_cx, final_cy), radius_of_growth_hr, (0, 255, 255), -1)
+    final_image_hr = cv2.addWeighted(overlay, 0.5, final_image_hr, 0.5, 0)
+    cv2.arrowedLine(final_image_hr, (last_cx_hr, last_cy_hr), (final_cx, final_cy), (0, 0, 255), 6, tipLength=0.03)
+    cv2.circle(final_image_hr, (last_cx_hr, last_cy_hr), 12, (255, 0, 0), -1)
+    cv2.circle(final_image_hr, (final_cx, final_cy), 12, (0, 0, 255), -1)
+
+    final_h, final_w, _ = final_image_hr.shape
+    display_h = int(final_h * (FINAL_IMAGE_DISPLAY_WIDTH / final_w))
+    display_image = cv2.resize(final_image_hr, (FINAL_IMAGE_DISPLAY_WIDTH, display_h))
+    final_image_rgb = cv2.cvtColor(display_image, cv2.COLOR_BGR2RGB)
+    
+    results = {
+        "last_year": last_data['year'],
+        "predicted_year": YEAR_TO_PREDICT,
+        "area_increase_percent": (predicted_area / last_data['area'] - 1) * 100
     }
-}
-
-# Coordenadas do centro de João Pessoa
-LAT_JP, LON_JP = -7.1195, -34.8451
-
-# NOVO: Coordenadas da "cerca" geográfica (bounding box) para a Grande João Pessoa
-# Formato: [[sul, oeste], [norte, leste]]
-GRANDE_JP_BOUNDS = [
-    [-7.30, -35.00],  # Canto Sudoeste (aprox. Conde/Santa Rita)
-    [-6.95, -34.78]   # Canto Nordeste (aprox. Cabedelo)
-]
-
-try:
-    # --- Criação do Mapa Base ---
-    # ALTERADO: Adicionados parâmetros para limitar zoom e área de navegação
-    m = folium.Map(
-        location=[LAT_JP, LON_JP],
-        zoom_start=12,
-        tiles='Esri.WorldImagery',
-        attr='Tiles &copy; Esri &mdash; Source: Esri',
-        min_zoom=11.8, # Impede de dar zoom out para além deste nível
-        max_zoom=18, # Impede de dar zoom in excessivo
-        max_bounds=True, # Ativa a restrição de área
-        max_lat=GRANDE_JP_BOUNDS[1][0], # Limite Norte
-        min_lat=GRANDE_JP_BOUNDS[0][0], # Limite Sul
-        max_lon=GRANDE_JP_BOUNDS[1][0], # Limite Leste
-        min_lon=GRANDE_JP_BOUNDS[0][1]  # Limite Oeste
-    )
+    
+    return final_image_rgb, results
 
 
-    # --- Seletor de Múltiplas Camadas ---
-    titulos_camadas = list(CAMADAS_WMS.keys())
-    camadas_selecionadas = st.multiselect(
-        "Selecione as camadas de dados para sobrepor:",
-        titulos_camadas,
-        default=[]
-    )
+# --- INTERFACE STREAMLIT ---
 
-    # Adiciona as camadas WMS que foram selecionadas
-    for titulo in camadas_selecionadas:
-        info_camada = CAMADAS_WMS[titulo]
-        folium.WmsTileLayer(
-            url=info_camada["url"],
-            layers=info_camada["layer_name"],
-            transparent=True,
-            control=True,
-            fmt='image/png',
-            name=titulo
-        ).add_to(m)
+st.set_page_config(layout="wide", page_title="Previsão de Expansão Urbana")
+st.title("📈 Previsão de Expansão Urbana - João Pessoa")
 
-    # --- Adicionar seus Dados de Análise/Previsão ---
-    st.sidebar.header("Área de Simulação")
-    show_prediction = st.sidebar.checkbox("Mostrar área de análise/previsão no mapa")
+st.markdown("""
+Este aplicativo analisa imagens históricas de satélite e estima a região com maior crescimento no urbano futuro até 2030.
+""")
 
-    if show_prediction:
-        coordenadas_previsao = [
-            [-7.172, -34.835], [-7.185, -34.845],
-            [-7.195, -34.830], [-7.180, -34.820],
-        ]
+if st.button('Iniciar Análise e Previsão'):
+    st.info("Processando... Aguarde alguns instantes.")
+    
+    image_placeholder = st.empty()
+    status_placeholder = st.empty()
 
-        folium.Polygon(
-            locations=coordenadas_previsao,
-            popup='<b>Área de Análise 1</b>',
-            color='#E32227', fill=True, fill_color='#E32227', fill_opacity=0.3,
-            tooltip="Clique para ver detalhes", name="Previsão de Crescimento"
-        ).add_to(m)
-
-    # Adiciona controle de camadas ao mapa
-    if camadas_selecionadas or show_prediction:
-        folium.LayerControl().add_to(m)
-
-    # Exibe o mapa no Streamlit
-    st_folium(m, width=1200, height=700)
-
-except Exception as e:
-    st.error(f"Ocorreu um erro ao carregar o mapa: {e}")
+    with st.spinner('Executando análise...'):
+        final_prediction_image, results = run_analysis_and_prediction(image_placeholder, status_placeholder)
+    
+    if final_prediction_image is not None and results is not None:
+        status_placeholder.empty()
+        image_placeholder.empty()
+        st.success("Análise concluída com sucesso!")
+        st.image(final_prediction_image, caption=f"Previsão para {results['predicted_year']}", use_container_width=True)
+        
+        st.subheader("Resultados da Previsão")
+        col1, col2 = st.columns(2)
+        col1.metric(label="Ano Base", value=results['last_year'])
+        col2.metric(label="Aumento Estimado de Área", value=f"{results['area_increase_percent']:.2f} %")
+else:
+    st.warning("Clique no botão acima para iniciar.")
