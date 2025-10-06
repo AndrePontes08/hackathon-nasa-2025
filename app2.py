@@ -8,7 +8,7 @@ import os
 import time
 
 # --- CONFIGURAÇÕES ---
-IMAGE_FOLDER = 'dataset'
+IMAGE_FOLDER = 'dataset2'
 N_CLUSTERS = 4
 URBAN_REFERENCE_COLOR = np.array([120, 110, 100])
 YEAR_TO_PREDICT = 2030
